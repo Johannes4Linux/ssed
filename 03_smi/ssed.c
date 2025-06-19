@@ -75,7 +75,7 @@ static int ssed_mdio_read(struct mii_bus *bus, int phy_id, int reg)
 	int status;
 	u8 data[3];
 	struct ssed_net *priv = bus->priv;
-	struct device *dev = &priv->net->dev;
+	struct device *dev = &priv->spi->dev;
 
 	dev_info(dev, "ssed_mdio_read phy_id: %d, reg: 0x%x\n", phy_id, reg);
 
@@ -113,7 +113,7 @@ static int ssed_mdio_write(struct mii_bus *bus, int phy_id, int reg, u16 val)
 	int status;
 	u8 data[3];
 	struct ssed_net *priv = bus->priv;
-	struct device *dev = &priv->net->dev;
+	struct device *dev = &priv->spi->dev;
 
 	dev_info(dev, "ssed_mdio_write phy_id: %d, reg: 0x%x, val: 0x%x\n", phy_id, reg, val);
 
@@ -144,7 +144,7 @@ static int ssed_mdio_init(struct ssed_net *priv)
 {
 	struct mii_bus *bus;
 	int status;
-	struct device *dev = &priv->net->dev;
+	struct device *dev = &priv->spi->dev;
 
 	bus = mdiobus_alloc();
 	if (!bus) {
@@ -174,8 +174,8 @@ static int ssed_mdio_init(struct ssed_net *priv)
 		goto out;
 	}
 
-
-	dev_info(dev, "Found PHY %s\n", priv->phy->drv->name);
+	printk("Found PHY %s\n", priv->phy->drv->name);
+	priv->net->phydev = priv->phy;
 
 	priv->mii_bus = bus;
 
@@ -183,6 +183,28 @@ static int ssed_mdio_init(struct ssed_net *priv)
 out:
 	mdiobus_free(bus);
 	return status;
+}
+
+static int ssed_ioctl(struct net_device *net, struct ifreq *rq, int cmd)
+{
+	if (!net->phydev) {
+		dev_err(&net->dev, "No phydev\n");
+		return -EINVAL;
+	}
+
+	if (!netif_running(net)) {
+		dev_err(&net->dev, "Netdev not running\n");
+		return -EINVAL;
+	}
+
+	switch (cmd) {
+		case SIOCGMIIPHY:
+		case SIOCGMIIREG:
+		case SIOCSMIIREG:
+			return phy_mii_ioctl(net->phydev, rq, cmd);
+		default:
+			return -EOPNOTSUPP;
+	}
 }
 
 static int ssed_net_open(struct net_device *net)
@@ -200,6 +222,7 @@ static int ssed_net_release(struct net_device *net)
 static const struct net_device_ops ssed_net_ops = {
 	.ndo_open = ssed_net_open,
 	.ndo_stop = ssed_net_release,
+	.ndo_eth_ioctl = ssed_ioctl,
 };
 
 static void ssed_net_init(struct net_device *net)
@@ -249,6 +272,8 @@ static int ssed_probe(struct spi_device *spi)
 		dev_err(&spi->dev, "Error requesting interrupt\n");
 		goto out;
 	}
+
+	printk("ssed - Probing done!\n");
 
 	return register_netdev(net);
 out:
