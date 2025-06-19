@@ -32,6 +32,8 @@ modules.builtin
 *.lzo
 *.patch
 *.gcno
+*.dtbo
+*.mod
 
 #
 # Top-level generic files
