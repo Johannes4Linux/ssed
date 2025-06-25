@@ -1,35 +1,87 @@
 #include <linux/spi/spi.h>
 #include <linux/delay.h>
+#include <linux/mutex.h>
+#include <linux/interrupt.h>
+
+struct ssed_net {
+	struct spi_device *spi;
+	struct mutex lock;
+};
+
+static int ssed_write_read(struct ssed_net *priv, u8 *wr_buf, u8 wr_size, u8 *rd_buf, u8 rd_size)
+{
+	int status;
+
+	status = spi_write(priv->spi, wr_buf, wr_size);
+	if (status)
+		return status;
+
+	udelay(15);
+
+	return spi_read(priv->spi, rd_buf, rd_size);
+}
+
+static int ssed_w8r8(struct ssed_net *priv, u8 cmd)
+{
+	int status;
+	u8 resp;
+
+	mutex_lock(&priv->lock);
+	status = ssed_write_read(priv, &cmd, 1, &resp, 1);
+	mutex_unlock(&priv->lock);
+
+	if (status)
+		return status;
+	return resp;
+}
+
+static irqreturn_t ssed_irq(int irq, void *irq_data)
+{
+	struct ssed_net *priv = irq_data;
+	pr_info("IRQ was triggered!\n");
+
+	// Remove the comment of the line below to get a kernel panic :-)
+	//ssed_w8r8(priv, 0x8);
+	return IRQ_HANDLED;
+}
+	
 
 static int ssed_probe(struct spi_device *spi)
 {
 	int status;
-	u8 data = 10;
+	struct ssed_net *priv;
+	u8 data = 0xb;
 
-	status = spi_write(spi, &data, 1);
+	priv = kzalloc(sizeof(struct ssed_net), GFP_KERNEL);
+	if (!priv)
+		return -ENOMEM;
 
+	priv->spi = spi;
+	mutex_init(&priv->lock);
+
+	spi_set_drvdata(spi, priv);
+
+	status = request_irq(spi->irq, ssed_irq, 0, "ssed", priv);
 	if (status) {
-		dev_err(&spi->dev, "SPI write failed\n");
+		kfree(priv);
 		return status;
 	}
 
-	udelay(25);
+	ssed_w8r8(priv, 0x8);
 
-	status = spi_read(spi, &data, 1);
-
-	if (status) {
-		dev_err(&spi->dev, "SPI read failed\n");
-		return status;
-	}
-
-	dev_info(&spi->dev, "data: 0x%x\n", data);
+	spi_write(spi, &data, 1);
 
 	return 0;
 }
 
 static void ssed_remove(struct spi_device *spi)
 {
+	struct ssed_net *priv;
 	dev_info(&spi->dev, "ssed_remove\n");
+
+	priv = spi_get_drvdata(spi);
+	free_irq(spi->irq, priv);
+	kfree(priv);
 }
 
 static const struct of_device_id ssed_dt_ids[] = {
