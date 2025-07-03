@@ -2,10 +2,12 @@
 #include <linux/delay.h>
 #include <linux/mutex.h>
 #include <linux/interrupt.h>
+#include <linux/workqueue.h>
 
 struct ssed_net {
 	struct spi_device *spi;
 	struct mutex lock;
+	struct work_struct irq_work;
 };
 
 static int ssed_write_read(struct ssed_net *priv, u8 *wr_buf, u8 wr_size, u8 *rd_buf, u8 rd_size)
@@ -35,13 +37,20 @@ static int ssed_w8r8(struct ssed_net *priv, u8 cmd)
 	return resp;
 }
 
+static void ssed_irq_work_handler(struct work_struct *w)
+{
+	struct ssed_net *priv = container_of(w, struct ssed_net, irq_work);
+	u8 resp = ssed_w8r8(priv, 0x8);
+
+	dev_info(&priv->spi->dev, "IRQ Work handler is running. IRQ flags: 0x%x\n", resp);
+}
+
 static irqreturn_t ssed_irq(int irq, void *irq_data)
 {
 	struct ssed_net *priv = irq_data;
 	pr_info("IRQ was triggered!\n");
 
-	// Remove the comment of the line below to get a kernel panic :-)
-	//ssed_w8r8(priv, 0x8);
+	schedule_work(&priv->irq_work);
 	return IRQ_HANDLED;
 }
 	
@@ -58,6 +67,7 @@ static int ssed_probe(struct spi_device *spi)
 
 	priv->spi = spi;
 	mutex_init(&priv->lock);
+	INIT_WORK(&priv->irq_work, ssed_irq_work_handler);
 
 	spi_set_drvdata(spi, priv);
 
