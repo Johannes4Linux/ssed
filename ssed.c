@@ -3,10 +3,12 @@
 #include <linux/mutex.h>
 #include <linux/interrupt.h>
 #include <linux/workqueue.h>
+#include <linux/netdevice.h>
 
 struct ssed_net {
 	struct spi_device *spi;
 	struct mutex lock;
+	struct net_device *net;
 	struct work_struct irq_work;
 };
 
@@ -53,17 +55,58 @@ static irqreturn_t ssed_irq(int irq, void *irq_data)
 	schedule_work(&priv->irq_work);
 	return IRQ_HANDLED;
 }
-	
+
+static int ssed_net_open(struct net_device *net)
+{
+	struct ssed_net *priv = netdev_priv(net);
+
+	dev_info(&priv->spi->dev, "ssed_net_open\n");
+
+	netif_stop_queue(net);
+
+	return 0;
+}
+
+static int ssed_net_release(struct net_device *net)
+{
+	struct ssed_net *priv = netdev_priv(net);
+
+	dev_info(&priv->spi->dev, "ssed_net_release\n");
+
+	return 0;
+}
+
+static const struct net_device_ops ssed_net_ops = {
+	.ndo_open = ssed_net_open,
+	.ndo_stop = ssed_net_release,
+};
+
+static void ssed_net_init(struct net_device *net)
+{
+	struct ssed_net *priv = netdev_priv(net);
+
+	pr_info("ssed_net_init\n");
+
+	ether_setup(net);
+
+	net->netdev_ops = &ssed_net_ops;
+
+	memset(priv, 0, sizeof(struct ssed_net));
+	priv->net = net;
+}
 
 static int ssed_probe(struct spi_device *spi)
 {
 	int status;
 	struct ssed_net *priv;
-	u8 data = 0xb;
+	struct net_device *net;
 
-	priv = kzalloc(sizeof(struct ssed_net), GFP_KERNEL);
-	if (!priv)
+	//net = alloc_etherdev(sizeof(struct ssed_net));
+	net = alloc_netdev(sizeof(struct ssed_net), "ssed%d", NET_NAME_UNKNOWN, ssed_net_init);
+	if (!net)
 		return -ENOMEM;
+
+	priv = netdev_priv(net);
 
 	priv->spi = spi;
 	mutex_init(&priv->lock);
@@ -73,13 +116,16 @@ static int ssed_probe(struct spi_device *spi)
 
 	status = request_irq(spi->irq, ssed_irq, 0, "ssed", priv);
 	if (status) {
-		kfree(priv);
+		free_netdev(net);
 		return status;
 	}
 
-	ssed_w8r8(priv, 0x8);
+	status = register_netdev(net);
 
-	spi_write(spi, &data, 1);
+	if (status) {
+		free_netdev(net);
+		return status;
+	}
 
 	return 0;
 }
@@ -91,7 +137,8 @@ static void ssed_remove(struct spi_device *spi)
 
 	priv = spi_get_drvdata(spi);
 	free_irq(spi->irq, priv);
-	kfree(priv);
+	unregister_netdev(priv->net);
+	free_netdev(priv->net);
 }
 
 static const struct of_device_id ssed_dt_ids[] = {
