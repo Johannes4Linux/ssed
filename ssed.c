@@ -4,13 +4,20 @@
 #include <linux/interrupt.h>
 #include <linux/workqueue.h>
 #include <linux/netdevice.h>
+#include <linux/phy.h>
 
 struct ssed_net {
 	struct spi_device *spi;
 	struct mutex lock;
 	struct net_device *net;
 	struct work_struct irq_work;
+	struct mii_bus *bus;
+	struct phy_device *phy;
 };
+
+#define SET_SMI_OP	0x1
+#define GET_SMI		0x2
+#define SET_SMI		0x3
 
 static int ssed_write_read(struct ssed_net *priv, u8 *wr_buf, u8 wr_size, u8 *rd_buf, u8 rd_size)
 {
@@ -20,7 +27,7 @@ static int ssed_write_read(struct ssed_net *priv, u8 *wr_buf, u8 wr_size, u8 *rd
 	if (status)
 		return status;
 
-	udelay(15);
+	usleep_range(10, 20);
 
 	return spi_read(priv->spi, rd_buf, rd_size);
 }
@@ -37,6 +44,109 @@ static int ssed_w8r8(struct ssed_net *priv, u8 cmd)
 	if (status)
 		return status;
 	return resp;
+}
+
+static int ssed_mdio_read(struct mii_bus *bus, int phy_addr, int reg_addr)
+{
+	int status;
+	u8 data[3];
+	struct ssed_net *priv = bus->priv;
+
+	data[0] = SET_SMI_OP;
+	data[1] = (phy_addr >> 4);
+	data[2] = (phy_addr << 5) | reg_addr;
+
+	mutex_lock(&priv->lock);
+
+	status = ssed_write_read(priv, data, sizeof(data), NULL, 0);
+	if (status)
+		goto out;
+
+	usleep_range(900, 1100);
+
+	data[0] = GET_SMI;
+	status = ssed_write_read(priv, data, 1, &data[1], 2);
+	if (status)
+		goto out;
+
+	status = (data[1] << 8) | data[2];
+
+	dev_info(&priv->spi->dev, "MDIO Read: phy_addr: %d, reg_addr: %d, value: 0x%04x\n", phy_addr, reg_addr, status);
+
+out:
+	mutex_unlock(&priv->lock);
+	return status;
+}
+
+static int ssed_mdio_write(struct mii_bus *bus, int phy_addr, int reg_addr, u16 value)
+{
+	int status;
+	u8 data[3];
+	struct ssed_net *priv = bus->priv;
+
+	data[0] = SET_SMI;
+	data[1] = value >> 8;
+	data[2] = value;
+
+	mutex_lock(&priv->lock);
+
+	status = ssed_write_read(priv, data, sizeof(data), NULL, 0);
+	if (status)
+		goto out;
+
+	data[0] = SET_SMI_OP;
+	data[1] = (1<<2) | (phy_addr >> 4);
+	data[2] = (phy_addr << 5) | reg_addr;
+
+
+	status = ssed_write_read(priv, data, sizeof(data), NULL, 0);
+	if (status)
+		goto out;
+
+	dev_info(&priv->spi->dev, "MDIO Write: phy_addr: %d, reg_addr: %d, value: 0x%04x\n", phy_addr, reg_addr, value);
+
+out:
+	mutex_unlock(&priv->lock);
+	return status;
+}
+
+static int ssed_mdio_init(struct ssed_net *priv)
+{
+	int status;
+	struct device *dev = &priv->spi->dev;
+	struct mii_bus *bus = mdiobus_alloc();
+
+	if(!bus)
+		return -ENOMEM;
+
+	snprintf(bus->id, MII_BUS_ID_SIZE, "mdio-ssed");
+	bus->priv = priv;
+	bus->name = "SSED MDIO";
+	bus->read = ssed_mdio_read;
+	bus->write = ssed_mdio_write;
+	bus->parent = dev;
+
+	status = mdiobus_register(bus);
+	if (status) {
+		dev_err(dev, "Error registering MDIO bus\n");
+		goto out;
+	}
+
+	priv->phy = phy_find_first(bus);
+	if (!priv->phy) {
+		dev_err(dev, "Error: No Ethernet PHY found\n");
+		status = -ENODEV;
+		mdiobus_unregister(bus);
+		goto out;
+	}
+
+	dev_info(dev, "Found Ethernet PHY: %s\n", priv->phy->drv->name);
+	priv->bus = bus;
+
+	return 0;
+out:
+	mdiobus_free(bus);
+	return status;
 }
 
 static void ssed_irq_work_handler(struct work_struct *w)
@@ -116,18 +226,29 @@ static int ssed_probe(struct spi_device *spi)
 
 	status = request_irq(spi->irq, ssed_irq, 0, "ssed", priv);
 	if (status) {
-		free_netdev(net);
-		return status;
+		goto free_net;
 	}
+
+	status = ssed_mdio_init(priv);
+	if (status) 
+		goto free_irq;
 
 	status = register_netdev(net);
 
-	if (status) {
-		free_netdev(net);
-		return status;
-	}
+	if (status)
+		goto free_bus;
 
 	return 0;
+
+free_bus:
+	mdiobus_unregister(priv->bus);
+	mdiobus_free(priv->bus);
+free_irq:
+	free_irq(spi->irq, priv);
+free_net:
+	free_netdev(net);
+	return status;
+
 }
 
 static void ssed_remove(struct spi_device *spi)
@@ -136,6 +257,10 @@ static void ssed_remove(struct spi_device *spi)
 	dev_info(&spi->dev, "ssed_remove\n");
 
 	priv = spi_get_drvdata(spi);
+	if (priv->bus) {
+		mdiobus_unregister(priv->bus);
+		mdiobus_free(priv->bus);
+	}
 	free_irq(spi->irq, priv);
 	unregister_netdev(priv->net);
 	free_netdev(priv->net);
