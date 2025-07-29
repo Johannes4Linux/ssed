@@ -142,6 +142,7 @@ static int ssed_mdio_init(struct ssed_net *priv)
 
 	dev_info(dev, "Found Ethernet PHY: %s\n", priv->phy->drv->name);
 	priv->bus = bus;
+	priv->net->phydev = priv->phy;
 
 	return 0;
 out:
@@ -166,6 +167,24 @@ static irqreturn_t ssed_irq(int irq, void *irq_data)
 	return IRQ_HANDLED;
 }
 
+static int ssed_ioctl(struct net_device *net, struct ifreq *rq, int cmd)
+{
+	if (!net->phydev)
+		return -EINVAL;
+	if (!netif_running(net))
+		return -EINVAL;
+
+	switch (cmd) {
+		case SIOCGMIIPHY:
+		case SIOCGMIIREG:
+		case SIOCSMIIREG:
+			return phy_mii_ioctl(net->phydev, rq, cmd);
+		default:
+			return -EOPNOTSUPP;
+	}
+}
+
+
 static int ssed_net_open(struct net_device *net)
 {
 	struct ssed_net *priv = netdev_priv(net);
@@ -189,6 +208,7 @@ static int ssed_net_release(struct net_device *net)
 static const struct net_device_ops ssed_net_ops = {
 	.ndo_open = ssed_net_open,
 	.ndo_stop = ssed_net_release,
+	.ndo_eth_ioctl = ssed_ioctl,
 };
 
 static void ssed_net_init(struct net_device *net)
