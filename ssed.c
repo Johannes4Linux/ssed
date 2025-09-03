@@ -5,6 +5,7 @@
 #include <linux/workqueue.h>
 #include <linux/netdevice.h>
 #include <linux/phy.h>
+#include <linux/etherdevice.h>
 
 struct ssed_net {
 	struct spi_device *spi;
@@ -18,6 +19,7 @@ struct ssed_net {
 #define SET_SMI_OP	0x1
 #define GET_SMI		0x2
 #define SET_SMI		0x3
+#define SET_MAC		0x4
 
 static int ssed_write_read(struct ssed_net *priv, u8 *wr_buf, u8 wr_size, u8 *rd_buf, u8 rd_size)
 {
@@ -184,6 +186,27 @@ static int ssed_ioctl(struct net_device *net, struct ifreq *rq, int cmd)
 	}
 }
 
+static int ssed_set_mac_addr(struct net_device *net, void *address)
+{
+	struct ssed_net *priv = netdev_priv(net);
+	struct sockaddr *addr = address;
+	u8 data[7];
+	int status;
+
+	if (netif_running(net))
+		return -EBUSY;
+
+	eth_hw_addr_set(net, addr->sa_data);
+	data[0] = SET_MAC;
+	memcpy(&data[1], addr->sa_data, ETH_ALEN);
+
+	mutex_lock(&priv->lock);
+	status = spi_write(priv->spi, data, sizeof(data));
+	mutex_unlock(&priv->lock);
+
+	return status;
+}
+	
 
 static int ssed_net_open(struct net_device *net)
 {
@@ -209,6 +232,7 @@ static const struct net_device_ops ssed_net_ops = {
 	.ndo_open = ssed_net_open,
 	.ndo_stop = ssed_net_release,
 	.ndo_eth_ioctl = ssed_ioctl,
+	.ndo_set_mac_address = ssed_set_mac_addr,
 };
 
 static void ssed_net_init(struct net_device *net)
@@ -257,6 +281,10 @@ static int ssed_probe(struct spi_device *spi)
 
 	if (status)
 		goto free_bus;
+
+	/* Set a random MAC */
+	eth_hw_addr_random(net);
+	dev_info(&spi->dev, "MAC addr: %pM\n", net->dev_addr);
 
 	return 0;
 
