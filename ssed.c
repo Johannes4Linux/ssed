@@ -14,12 +14,16 @@ struct ssed_net {
 	struct work_struct irq_work;
 	struct mii_bus *bus;
 	struct phy_device *phy;
+	struct work_struct xmit_work;
+	struct sk_buff *tx_skb;
 };
 
 #define SET_SMI_OP	0x1
 #define GET_SMI		0x2
 #define SET_SMI		0x3
 #define SET_MAC		0x4
+#define SEND_FRAME	0x6
+#define GET_IRQ		0x8
 
 static int ssed_write_read(struct ssed_net *priv, u8 *wr_buf, u8 wr_size, u8 *rd_buf, u8 rd_size)
 {
@@ -155,7 +159,13 @@ out:
 static void ssed_irq_work_handler(struct work_struct *w)
 {
 	struct ssed_net *priv = container_of(w, struct ssed_net, irq_work);
-	u8 resp = ssed_w8r8(priv, 0x8);
+
+	u8 resp = ssed_w8r8(priv, GET_IRQ);
+
+	if (resp & 0x10) {
+		dev_info(&priv->spi->dev, "Frame was send successfully!\n");
+		netif_wake_queue(priv->net);
+	}
 
 	dev_info(&priv->spi->dev, "IRQ Work handler is running. IRQ flags: 0x%x\n", resp);
 }
@@ -206,15 +216,57 @@ static int ssed_set_mac_addr(struct net_device *net, void *address)
 
 	return status;
 }
-	
+
+static void ssed_hw_xmit(struct work_struct *work)
+{
+	u8 spi_data[3], *data, shortpkt[ETH_ZLEN];
+	int len, status;
+	struct ssed_net *priv = container_of(work, struct ssed_net, xmit_work);
+
+	data = priv->tx_skb->data;
+	len = priv->tx_skb->len;
+	if (len < 64) {
+		memset(shortpkt, 0, ETH_ZLEN);
+		memcpy(shortpkt, data, len);
+		len = ETH_ZLEN;
+		data = shortpkt;
+	}
+
+	spi_data[0] = SEND_FRAME;
+	spi_data[1] = len >> 8;
+	spi_data[2] = len;
+
+	mutex_lock(&priv->lock);
+	status = spi_write(priv->spi, spi_data, 3);
+	if (status)
+		goto out;
+
+	status = spi_write(priv->spi, data, len);
+	if (!status)
+		dev_info(&priv->spi->dev, "Frame with %d bytes was send to SSED\n", len);
+
+out:
+	mutex_unlock(&priv->lock);
+}
+
+static netdev_tx_t ssed_send(struct sk_buff *skb, struct net_device *net)
+{
+	struct ssed_net *priv = netdev_priv(net);
+
+	/* stop the transmit queue, because SSED can only handle one frame at a time */
+	netif_stop_queue(net);
+
+	priv->tx_skb = skb;
+	schedule_work(&priv->xmit_work);
+
+	return NETDEV_TX_OK;
+}
 
 static int ssed_net_open(struct net_device *net)
 {
 	struct ssed_net *priv = netdev_priv(net);
 
 	dev_info(&priv->spi->dev, "ssed_net_open\n");
-
-	netif_stop_queue(net);
 
 	return 0;
 }
@@ -233,6 +285,7 @@ static const struct net_device_ops ssed_net_ops = {
 	.ndo_stop = ssed_net_release,
 	.ndo_eth_ioctl = ssed_ioctl,
 	.ndo_set_mac_address = ssed_set_mac_addr,
+	.ndo_start_xmit = ssed_send,
 };
 
 static void ssed_net_init(struct net_device *net)
@@ -265,6 +318,7 @@ static int ssed_probe(struct spi_device *spi)
 	priv->spi = spi;
 	mutex_init(&priv->lock);
 	INIT_WORK(&priv->irq_work, ssed_irq_work_handler);
+	INIT_WORK(&priv->xmit_work, ssed_hw_xmit);
 
 	spi_set_drvdata(spi, priv);
 
