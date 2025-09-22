@@ -225,7 +225,7 @@ static void ssed_hw_xmit(struct work_struct *work)
 
 	data = priv->tx_skb->data;
 	len = priv->tx_skb->len;
-	if (len < 64) {
+	if (len < ETH_ZLEN) {
 		memset(shortpkt, 0, ETH_ZLEN);
 		memcpy(shortpkt, data, len);
 		len = ETH_ZLEN;
@@ -242,11 +242,14 @@ static void ssed_hw_xmit(struct work_struct *work)
 		goto out;
 
 	status = spi_write(priv->spi, data, len);
+out:
+	mutex_unlock(&priv->lock);
+
 	if (!status)
 		dev_info(&priv->spi->dev, "Frame with %d bytes was send to SSED\n", len);
 
-out:
-	mutex_unlock(&priv->lock);
+	dev_kfree_skb(priv->tx_skb);
+
 }
 
 static netdev_tx_t ssed_send(struct sk_buff *skb, struct net_device *net)
