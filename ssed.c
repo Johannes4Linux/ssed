@@ -23,6 +23,7 @@ struct ssed_net {
 #define SET_SMI		0x3
 #define SET_MAC		0x4
 #define SEND_FRAME	0x6
+#define RECV_FRAME	0x7
 #define GET_IRQ		0x8
 
 static int ssed_write_read(struct ssed_net *priv, u8 *wr_buf, u8 wr_size, u8 *rd_buf, u8 rd_size)
@@ -156,6 +157,41 @@ out:
 	return status;
 }
 
+static void ssed_recv_frames(struct ssed_net *priv)
+{
+	u8 data[2], cmd = RECV_FRAME;
+	u16 len;
+	int status;
+	struct sk_buff *rx_skb;
+
+	do {
+		mutex_lock(&priv->lock);
+		status = ssed_write_read(priv, &cmd, 1, data, 2);
+		len = (data[0] << 8) | data[1];
+
+		if ((len > 0) && (status == 0)) {
+			do {
+				rx_skb = dev_alloc_skb(len);
+				if (!rx_skb) {
+					dev_err(&priv->spi->dev, "Could not allocate memory for rx_skb\n");
+					continue;
+				}
+			} while (!rx_skb);
+
+			status = spi_read(priv->spi, skb_put(rx_skb, len), len);
+		}
+		mutex_unlock(&priv->lock);
+
+		if ((len > 0) && (status == 0)) {
+			rx_skb->dev = priv->net;
+			rx_skb->protocol = eth_type_trans(rx_skb, priv->net);
+
+			netif_receive_skb(rx_skb);
+			dev_info(&priv->spi->dev, "Received frame with %d bytes\n", len);
+		}
+	} while (len);
+}
+
 static void ssed_irq_work_handler(struct work_struct *w)
 {
 	struct ssed_net *priv = container_of(w, struct ssed_net, irq_work);
@@ -166,6 +202,8 @@ static void ssed_irq_work_handler(struct work_struct *w)
 		dev_info(&priv->spi->dev, "Frame was send successfully!\n");
 		netif_wake_queue(priv->net);
 	}
+	if (resp & 0x04)
+		ssed_recv_frames(priv);
 
 	dev_info(&priv->spi->dev, "IRQ Work handler is running. IRQ flags: 0x%x\n", resp);
 }
